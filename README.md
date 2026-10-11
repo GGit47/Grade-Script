@@ -352,11 +352,13 @@ Choose an appropriate open-source license before publishing the repository. For 
 
 ## Author
 
-**Your Name**
+Gokul Sethumadhavan & Eshaan Sumesh
+
 
 AI-ML Undergraduate | Deep Learning | Computer Vision | Natural Language Processing
 
-GitHub: https://github.com/YOUR_USERNAME
+GitHub: https://github.com/GGit47
+GitHub: https://github.com/Eshaan1e24
 
 ---
 
