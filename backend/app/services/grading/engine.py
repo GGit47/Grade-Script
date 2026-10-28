@@ -1,5 +1,6 @@
 import re
 import string
+import json
 from typing import List, Dict, Any, Tuple
 import logging
 
@@ -105,30 +106,64 @@ class GradingEngine:
         reference_text: str,
         max_marks: float,
         essential_keywords_str: str = "",
-        rubric_criteria: str = ""
+        rubric_criteria: str = "",
+        alternative_answers_str: str = "",
+        negative_marking: float = 0.0
     ) -> Dict[str, Any]:
         """
         Evaluates answer using multi-factor transparent criteria:
         1. Blank or unreadable checks
         2. Essential concept coverage ratio (40% weight)
-        3. Semantic similarity score (50% weight)
+        3. Semantic similarity score (50% weight) - checks primary reference answer and acceptable alternatives
         4. Length/completeness heuristic (10% weight)
-        5. Rubric-based bounding
+        5. Rubric-based partial-credit allocation if structured criteria configured
+        6. Optional negative marking penalty for incorrect/unanswered questions
         """
+        raw_lower = (student_text or "").lower()
         norm_student = self.normalize_text(student_text)
         
         # Case 1: Empty or blank answer
-        if not norm_student or "[blank" in norm_student or "[unreadable" in norm_student:
+        if (
+            not norm_student
+            or "[blank" in raw_lower
+            or "[unreadable" in raw_lower
+            or norm_student.startswith("blank")
+            or norm_student.startswith("unreadable")
+        ):
+            kws = [kw.strip() for kw in essential_keywords_str.split(",") if kw.strip()]
             return {
                 "suggested_marks": 0.0,
                 "concepts_identified": [],
-                "missing_concepts": [kw.strip() for kw in essential_keywords_str.split(",") if kw.strip()],
+                "missing_concepts": kws,
                 "semantic_similarity": 0.0,
                 "rationale": "No readable answer provided or answer space was left blank.",
-                "review_needed": True
+                "review_needed": True,
+                "rubric_scores": []
             }
 
-        # Case 2: Matching concepts
+        # Case 2: Check similarity with reference answer AND any acceptable alternative answers
+        primary_sim = self.compute_semantic_similarity(student_text, reference_text)
+        best_sim = primary_sim
+        matched_alt = None
+
+        if alternative_answers_str:
+            alt_list = []
+            if alternative_answers_str.startswith("["):
+                try:
+                    alt_list = json.loads(alternative_answers_str)
+                except Exception:
+                    alt_list = [a.strip() for a in alternative_answers_str.split(";") if a.strip()]
+            else:
+                alt_list = [a.strip() for a in alternative_answers_str.split(";") if a.strip()]
+
+            for alt in alt_list:
+                if alt:
+                    alt_sim = self.compute_semantic_similarity(student_text, alt)
+                    if alt_sim > best_sim:
+                        best_sim = alt_sim
+                        matched_alt = alt
+
+        # Case 3: Matching concepts
         matched_concepts, missing_concepts = self.extract_and_match_concepts(
             student_text, essential_keywords_str, reference_text
         )
@@ -136,48 +171,100 @@ class GradingEngine:
         total_concepts = len(matched_concepts) + len(missing_concepts)
         concept_ratio = len(matched_concepts) / total_concepts if total_concepts > 0 else 0.8
 
-        # Case 3: Semantic similarity
-        similarity = self.compute_semantic_similarity(student_text, reference_text)
-
         # Case 4: Length completeness check
         ref_len = len(self.normalize_text(reference_text).split())
         student_len = len(norm_student.split())
-        length_ratio = min(1.0, student_len / max(1, ref_len * 0.6))
+        length_ratio = min(1.0, student_len / max(1, ref_len * 0.5))
 
-        # Weighted calculation
-        # Semantic similarity is supportive, not solitary:
-        combined_score = (0.45 * concept_ratio) + (0.45 * similarity) + (0.10 * length_ratio)
-        combined_score = max(0.0, min(1.0, combined_score))
+        # Case 5: Evaluate Structured Rubric Criteria
+        structured_rubric = []
+        if rubric_criteria:
+            try:
+                if rubric_criteria.strip().startswith("["):
+                    structured_rubric = json.loads(rubric_criteria)
+            except Exception:
+                structured_rubric = []
 
-        raw_marks = round(combined_score * max_marks, 1)
+        rubric_scores = []
+        rubric_awarded_total = 0.0
+        used_rubric_scoring = False
+
+        if structured_rubric and isinstance(structured_rubric, list):
+            used_rubric_scoring = True
+            for r_item in structured_rubric:
+                c_text = r_item.get("criterion", "")
+                c_max = float(r_item.get("marks", 1.0))
+                
+                # Check semantic alignment of student text with this specific criterion
+                c_sim = self.compute_semantic_similarity(student_text, c_text)
+                
+                # Also check keyword presence in student text
+                c_words = [w for w in self.normalize_text(c_text).split() if len(w) > 3]
+                c_word_hits = sum(1 for w in c_words if w in norm_student)
+                c_word_ratio = (c_word_hits / len(c_words)) if c_words else 0.5
+
+                c_score_ratio = (0.6 * c_sim) + (0.4 * c_word_ratio)
+                satisfied = c_score_ratio >= 0.38 or best_sim >= 0.70
+
+                if best_sim >= 0.80:
+                    awarded = c_max
+                elif satisfied:
+                    fraction = min(1.0, c_score_ratio * 1.3)
+                    awarded = round(fraction * c_max, 1)
+                else:
+                    awarded = 0.0
+
+                rubric_scores.append({
+                    "criterion": c_text,
+                    "max_marks": c_max,
+                    "awarded_marks": min(c_max, awarded),
+                    "satisfied": satisfied
+                })
+                rubric_awarded_total += awarded
+
+        # Determine suggested score
+        if used_rubric_scoring and rubric_scores:
+            raw_marks = min(max_marks, rubric_awarded_total)
+        else:
+            # Combined holistic score
+            combined_score = (0.45 * concept_ratio) + (0.45 * best_sim) + (0.10 * length_ratio)
+            combined_score = max(0.0, min(1.0, combined_score))
+            raw_marks = round(combined_score * max_marks, 1)
+
+        # Apply negative marking penalty if configured and student score is low
+        if negative_marking > 0 and best_sim < 0.20 and len(matched_concepts) == 0:
+            raw_marks = max(0.0, round(raw_marks - negative_marking, 1))
 
         # Rational and review flags
         review_needed = False
         reasons = []
 
-        if similarity > 0.8 and concept_ratio > 0.7:
-            reasons.append("Answer closely reflects the reference answer with all key concepts covered.")
-        elif similarity > 0.5:
-            reasons.append(f"Answer captures the central idea (similarity: {similarity:.2f}).")
+        if matched_alt:
+            reasons.append(f"Answer matches configured alternative reference solution (similarity: {best_sim:.2f}).")
+        elif best_sim > 0.8 and concept_ratio > 0.7:
+            reasons.append("Answer closely reflects the reference answer with key concepts covered.")
+        elif best_sim > 0.5:
+            reasons.append(f"Answer captures the central idea (similarity: {best_sim:.2f}).")
             if missing_concepts:
                 reasons.append(f"Missing essential concepts: {', '.join(missing_concepts)}.")
         else:
-            reasons.append(f"Low semantic alignment with reference solution (similarity: {similarity:.2f}).")
+            reasons.append(f"Low semantic alignment with reference solution (similarity: {best_sim:.2f}).")
             review_needed = True
 
         if raw_marks < (0.4 * max_marks) and len(norm_student.split()) > 10:
-            reasons.append("Answer contains lengthy explanation with low keyword match; requires teacher review.")
+            reasons.append("Answer contains lengthy explanation with low keyword match; requires teacher check.")
             review_needed = True
 
         rationale = " ".join(reasons)
 
         return {
-            "suggested_marks": min(max_marks, raw_marks),
+            "suggested_marks": min(max_marks, max(0.0, raw_marks)),
             "concepts_identified": matched_concepts,
             "missing_concepts": missing_concepts,
-            "semantic_similarity": round(similarity, 3),
+            "semantic_similarity": round(best_sim, 3),
             "rationale": rationale,
-            "review_needed": review_needed
+            "review_needed": review_needed,
+            "rubric_scores": rubric_scores
         }
 
 grading_engine = GradingEngine()

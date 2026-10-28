@@ -1,25 +1,38 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 import datetime
+
+# --- Rubric Item ---
+class RubricItem(BaseModel):
+    criterion: str
+    marks: float
 
 # --- Question Schemas ---
 class QuestionCreate(BaseModel):
     question_number: int
+    question_label: Optional[str] = ""
     question_text: str
     reference_answer: str
     max_marks: float
     essential_keywords: Optional[str] = None
-    rubric_criteria: Optional[str] = None
+    rubric_criteria: Optional[str] = None      # JSON string or description
+    partial_credit_rules: Optional[str] = None
+    alternative_answers: Optional[str] = None   # JSON string or comma-separated
+    negative_marking: Optional[float] = 0.0
 
 class QuestionResponse(BaseModel):
     id: int
     exam_id: int
     question_number: int
+    question_label: Optional[str] = ""
     question_text: str
     reference_answer: str
     max_marks: float
     essential_keywords: Optional[str] = None
     rubric_criteria: Optional[str] = None
+    partial_credit_rules: Optional[str] = None
+    alternative_answers: Optional[str] = None
+    negative_marking: Optional[float] = 0.0
 
     class Config:
         from_attributes = True
@@ -53,18 +66,50 @@ class ExamSummary(BaseModel):
     submission_count: int
     created_at: datetime.datetime
 
+# --- Answer Key Parsing Schemas ---
+class ParsedQuestionItem(BaseModel):
+    question_number: int
+    question_label: str
+    question_text: str
+    reference_answer: str
+    max_marks: float = 5.0
+    essential_keywords: str = ""
+    rubric_criteria: List[RubricItem] = []
+    partial_credit_rules: Optional[str] = ""
+    alternative_answers: List[str] = []
+    negative_marking: float = 0.0
+    source_page: Optional[int] = None
+    crop_path: Optional[str] = None
+
+class AnswerKeyParseResponse(BaseModel):
+    questions: List[ParsedQuestionItem]
+    unparsed_text: str = ""
+    page_count: int = 1
+    method: str = "text"
+
 # --- Submission Schemas ---
 class SubmissionCreate(BaseModel):
     exam_id: int
     student_roll_no: str
 
+class CandidateMatchItem(BaseModel):
+    question_id: int
+    question_label: str
+    question_number: int
+    score: float
+    reason: str
+
 class RegionCreate(BaseModel):
     page_id: int
     question_id: Optional[int] = None
-    bbox: Optional[str] = None # "[ymin, xmin, ymax, xmax]"
+    bbox: Optional[str] = None
 
 class RegionUpdate(BaseModel):
     question_id: Optional[int] = None
+    edited_text: Optional[str] = None
+
+class RegionRemapRequest(BaseModel):
+    question_id: Optional[int] = None # None means unassign/unmatched
     edited_text: Optional[str] = None
 
 class RegionResponse(BaseModel):
@@ -76,6 +121,12 @@ class RegionResponse(BaseModel):
     recognized_text: str
     edited_text: str
     confidence: float
+    detected_question_label: Optional[str] = None
+    mapping_confidence: float = 0.0
+    mapping_method: str = "unmatched"
+    candidate_matches: str = "[]"
+    is_ambiguous: bool = False
+    is_manually_mapped: bool = False
 
     class Config:
         from_attributes = True
@@ -112,6 +163,7 @@ class EvaluationItemResponse(BaseModel):
     review_needed: bool
     is_teacher_approved: bool
     teacher_notes: Optional[str]
+    rubric_scores: Optional[str] = "[]"
 
     class Config:
         from_attributes = True

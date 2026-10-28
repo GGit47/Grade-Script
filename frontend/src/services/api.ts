@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { Exam, DashboardStats, SubmissionDetail } from '../types';
+import type { Exam, DashboardStats, SubmissionDetail, AnswerKeyParseResponse } from '../types';
 
 const API_BASE = '/api';
 
@@ -25,14 +25,41 @@ export const api = {
     class_or_batch: string;
     questions: {
       question_number: number;
+      question_label?: string;
       question_text: string;
       reference_answer: string;
       max_marks: number;
       essential_keywords?: string;
       rubric_criteria?: string;
+      partial_credit_rules?: string;
+      alternative_answers?: string;
+      negative_marking?: number;
     }[];
   }): Promise<Exam> => {
     const res = await axios.post(`${API_BASE}/exams`, examData);
+    return res.data;
+  },
+
+  parseTextAnswerKey: async (file?: File, rawText?: string): Promise<AnswerKeyParseResponse> => {
+    const formData = new FormData();
+    if (file) {
+      formData.append('file', file);
+    }
+    if (rawText) {
+      formData.append('raw_text', rawText);
+    }
+    const res = await axios.post(`${API_BASE}/answer-keys/parse-text`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return res.data;
+  },
+
+  parseScannedAnswerKey: async (file: File): Promise<AnswerKeyParseResponse> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await axios.post(`${API_BASE}/answer-keys/parse-scanned`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
     return res.data;
   },
 
@@ -62,6 +89,14 @@ export const api = {
     data: { question_id?: number | null; edited_text?: string }
   ) => {
     const res = await axios.put(`${API_BASE}/regions/${regionId}`, data);
+    return res.data;
+  },
+
+  remapRegion: async (
+    regionId: number,
+    data: { question_id?: number | null; edited_text?: string }
+  ) => {
+    const res = await axios.put(`${API_BASE}/regions/${regionId}/remap`, data);
     return res.data;
   },
 

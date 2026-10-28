@@ -7,9 +7,13 @@ import {
   Save,
   FileCheck,
   ArrowLeft,
+  Shuffle,
+  CheckCircle2,
+  XCircle
 } from 'lucide-react';
+
 import { api } from '../services/api';
-import type { SubmissionDetail } from '../types';
+import type { SubmissionDetail, Exam, CandidateMatch, RubricScoreItem } from '../types';
 
 interface EvaluationReviewProps {
   submissionId: number;
@@ -21,10 +25,19 @@ export const EvaluationReview: React.FC<EvaluationReviewProps> = ({
   onBack,
 }) => {
   const [submission, setSubmission] = useState<SubmissionDetail | null>(null);
+  const [exam, setExam] = useState<Exam | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Edit Transcription state
   const [editingRegionId, setEditingRegionId] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
+
+  // Remap Question state
+  const [remappingRegionId, setRemappingRegionId] = useState<number | null>(null);
+  const [selectedRemapQuestionId, setSelectedRemapQuestionId] = useState<number | null>(null);
+
+  // Edit Marks state
   const [editingMarksId, setEditingMarksId] = useState<number | null>(null);
   const [teacherMarks, setTeacherMarks] = useState<number>(0);
   const [teacherNotes, setTeacherNotes] = useState<string>('');
@@ -35,6 +48,10 @@ export const EvaluationReview: React.FC<EvaluationReviewProps> = ({
       setLoading(true);
       const data = await api.getSubmission(submissionId);
       setSubmission(data);
+      if (data.exam_id) {
+        const examData = await api.getExam(data.exam_id);
+        setExam(examData);
+      }
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Failed to load submission data.');
     } finally {
@@ -54,6 +71,19 @@ export const EvaluationReview: React.FC<EvaluationReviewProps> = ({
       await fetchSubmission();
     } catch (err) {
       alert('Failed to update transcription.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRemapQuestion = async (regionId: number) => {
+    try {
+      setSaving(true);
+      await api.remapRegion(regionId, { question_id: selectedRemapQuestionId });
+      setRemappingRegionId(null);
+      await fetchSubmission();
+    } catch (err) {
+      alert('Failed to remap answer region.');
     } finally {
       setSaving(false);
     }
@@ -110,8 +140,16 @@ export const EvaluationReview: React.FC<EvaluationReviewProps> = ({
     );
   }
 
+  // Calculate intelligent mapping statistics
+  const totalRegions = submission.pages.reduce((acc, p) => acc + p.regions.length, 0);
+  const ambiguousRegions = submission.pages.flatMap((p) => p.regions).filter((r) => r.is_ambiguous);
+  const unansweredEvals = submission.evaluations.filter((e) => !e.region_id);
+  const duplicateRegions = submission.pages
+    .flatMap((p) => p.regions)
+    .filter((r) => r.mapping_method === 'duplicate_detected');
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-20 animate-fade-in">
       {/* Top Header Bar */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-4">
@@ -180,7 +218,43 @@ export const EvaluationReview: React.FC<EvaluationReviewProps> = ({
         </div>
       </div>
 
-      {/* Question Evaluation Cards */}
+      {/* Feature C: Intelligent Answer Mapping Status Banner */}
+      <div className="p-4 rounded-2xl bg-gradient-to-r from-slate-900 to-indigo-950 text-white shadow-md flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 bg-indigo-500/20 text-indigo-300 rounded-xl">
+            <Shuffle className="w-5 h-5" />
+          </div>
+          <div>
+            <h4 className="text-sm font-bold tracking-tight">Intelligent Answer-to-Question Mapping</h4>
+            <p className="text-xs text-slate-300">
+              Answers are matched to reference questions regardless of submission order using explicit labels, prompts, and semantic compatibility.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3 text-xs">
+          <span className="px-3 py-1 bg-white/10 rounded-lg">
+            Total Answer Blocks: <strong>{totalRegions}</strong>
+          </span>
+          {ambiguousRegions.length > 0 && (
+            <span className="px-3 py-1 bg-amber-500/30 text-amber-200 border border-amber-400/40 rounded-lg font-semibold flex items-center gap-1">
+              <AlertTriangle className="w-3.5 h-3.5" /> {ambiguousRegions.length} Ambiguous / Check Needed
+            </span>
+          )}
+          {duplicateRegions.length > 0 && (
+            <span className="px-3 py-1 bg-rose-500/30 text-rose-200 border border-rose-400/40 rounded-lg font-semibold flex items-center gap-1">
+              <AlertTriangle className="w-3.5 h-3.5" /> {duplicateRegions.length} Duplicate Answers
+            </span>
+          )}
+          {unansweredEvals.length > 0 && (
+            <span className="px-3 py-1 bg-slate-700/50 text-slate-300 rounded-lg">
+              {unansweredEvals.length} Unanswered Question(s)
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Answer Region & Question Evaluation Cards */}
       <div className="space-y-6">
         {submission.evaluations.map((evalItem, index) => {
           // Find corresponding region
@@ -196,23 +270,65 @@ export const EvaluationReview: React.FC<EvaluationReviewProps> = ({
             ? JSON.parse(evalItem.missing_concepts)
             : [];
 
+          const rubricScores: RubricScoreItem[] = evalItem.rubric_scores
+            ? JSON.parse(evalItem.rubric_scores)
+            : [];
+
+          const candidateMatches: CandidateMatch[] = region?.candidate_matches
+            ? JSON.parse(region.candidate_matches)
+            : [];
+
+          // Find mapped question details
+          const mappedQ = exam?.questions?.find((q) => q.id === evalItem.question_id);
+          const qLabel = mappedQ?.question_label || `Q${evalItem.question_id}`;
+
           return (
             <div
               key={evalItem.id}
               className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden"
             >
-              <div className="bg-slate-50 px-6 py-3.5 border-b border-slate-200 flex items-center justify-between">
-                <span className="font-bold text-sm text-slate-800 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-lg bg-blue-600 text-white text-xs flex items-center justify-center font-bold">
+              {/* Card Header with Question & Mapping Info */}
+              <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <span className="w-7 h-7 rounded-lg bg-blue-600 text-white text-xs flex items-center justify-center font-extrabold shadow-sm">
                     {index + 1}
                   </span>
-                  Question #{index + 1}
-                </span>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-extrabold text-slate-900 text-sm">
+                        {qLabel}: {mappedQ?.question_text || `Question #${index + 1}`}
+                      </span>
+
+                      {/* Mapping Confidence Badge */}
+                      {region && (
+                        <span
+                          className={`text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${
+                            region.is_manually_mapped
+                              ? 'bg-purple-100 text-purple-800'
+                              : region.is_ambiguous
+                              ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                              : region.mapping_method === 'explicit_label'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-blue-100 text-blue-800'
+                          }`}
+                        >
+                          {region.is_manually_mapped
+                            ? 'Teacher Remapped'
+                            : region.is_ambiguous
+                            ? '⚠️ Ambiguous Mapping'
+                            : region.mapping_method === 'explicit_label'
+                            ? `✓ Explicit Label (${region.detected_question_label || 'Matched'})`
+                            : `Semantic Match (${(region.mapping_confidence * 100).toFixed(0)}%)`}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
 
                 <div className="flex items-center gap-3">
                   {evalItem.review_needed && (
-                    <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold flex items-center gap-1">
-                      <AlertTriangle className="w-3.5 h-3.5" /> Needs Teacher Check
+                    <span className="px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold flex items-center gap-1">
+                      <AlertTriangle className="w-3.5 h-3.5" /> Review Needed
                     </span>
                   )}
                   <span className="text-xs text-slate-500 font-medium">
@@ -222,8 +338,84 @@ export const EvaluationReview: React.FC<EvaluationReviewProps> = ({
               </div>
 
               <div className="p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Left: Scanned Image Crop & Recognized Text */}
+                {/* Left: Scanned Image Crop, Detected Identifiers & Transcription */}
                 <div className="space-y-4 border-r border-slate-100 pr-0 lg:pr-6">
+                  {/* Intelligent Mapping & Re-mapping Controls */}
+                  {region && (
+                    <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-slate-700 flex items-center gap-1">
+                          <Shuffle className="w-3.5 h-3.5 text-blue-600" />
+                          Mapping: {region.detected_question_label ? `Detected '${region.detected_question_label}'` : 'Inferred via AI'}
+                        </span>
+
+                        {remappingRegionId !== region.id ? (
+                          <button
+                            onClick={() => {
+                              setRemappingRegionId(region.id);
+                              setSelectedRemapQuestionId(region.question_id || null);
+                            }}
+                            className="text-blue-600 hover:text-blue-800 font-bold flex items-center gap-1"
+                          >
+                            <Shuffle className="w-3 h-3" /> Re-map Question
+                          </button>
+                        ) : null}
+                      </div>
+
+                      {/* Remap Dropdown Selection */}
+                      {remappingRegionId === region.id && (
+                        <div className="mt-2 p-3 bg-white rounded-xl border border-blue-400 space-y-2">
+                          <label className="block text-[11px] font-bold uppercase text-slate-600">
+                            Assign this answer block to:
+                          </label>
+                          <select
+                            value={selectedRemapQuestionId || ''}
+                            onChange={(e) => setSelectedRemapQuestionId(e.target.value ? Number(e.target.value) : null)}
+                            className="w-full p-2 text-xs border border-slate-300 rounded-lg bg-white font-medium"
+                          >
+                            <option value="">-- Unmatched / Ignored --</option>
+                            {exam?.questions?.map((q) => (
+                              <option key={q.id} value={q.id}>
+                                {q.question_label || `Q${q.question_number}`}: {q.question_text.slice(0, 45)}...
+                              </option>
+                            ))}
+                          </select>
+                          <div className="flex justify-end gap-2 pt-1">
+                            <button
+                              onClick={() => setRemappingRegionId(null)}
+                              className="px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => handleRemapQuestion(region.id)}
+                              disabled={saving}
+                              className="px-3 py-1 text-xs bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700"
+                            >
+                              Confirm & Regrade
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Candidate Match Scores */}
+                      {candidateMatches.length > 1 && (
+                        <div className="pt-1 border-t border-slate-200/60 text-[11px] text-slate-500">
+                          <span className="font-semibold block mb-0.5">Alternative Candidate Matches:</span>
+                          <div className="space-y-0.5">
+                            {candidateMatches.slice(0, 3).map((cand, ci) => (
+                              <div key={ci} className="flex items-center justify-between">
+                                <span>{cand.question_label}: {cand.reason}</span>
+                                <span className="font-bold text-slate-700">{(cand.score * 100).toFixed(0)}%</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Scanned Crop */}
                   <div>
                     <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
                       Handwritten Source Crop
@@ -237,16 +429,17 @@ export const EvaluationReview: React.FC<EvaluationReviewProps> = ({
                         />
                       </div>
                     ) : (
-                      <div className="h-32 border border-dashed border-slate-200 rounded-xl flex items-center justify-center text-xs text-slate-400">
-                        No crop assigned
+                      <div className="h-28 border border-dashed border-slate-200 rounded-xl flex items-center justify-center text-xs text-slate-400">
+                        Unanswered question / No handwritten region mapped
                       </div>
                     )}
                   </div>
 
+                  {/* OCR Transcription & Inline Editing */}
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
                       <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                        TrOCR Extracted Text
+                        TrOCR Extracted Transcription
                       </h4>
                       {region && editingRegionId !== region.id && (
                         <button
@@ -287,7 +480,7 @@ export const EvaluationReview: React.FC<EvaluationReviewProps> = ({
                       </div>
                     ) : (
                       <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-sm text-slate-800 leading-relaxed italic">
-                        "{evalItem.transcribed_answer || '[No text transcribed]'}"
+                        "{evalItem.transcribed_answer || '[No answer written]'}"
                       </div>
                     )}
                   </div>
@@ -303,6 +496,35 @@ export const EvaluationReview: React.FC<EvaluationReviewProps> = ({
                         {(evalItem.semantic_similarity * 100).toFixed(0)}% Similarity
                       </span>
                     </div>
+
+                    {/* Rubric Breakdown List (Feature B) */}
+                    {rubricScores.length > 0 && (
+                      <div>
+                        <span className="text-xs font-semibold text-slate-600 block mb-1">
+                          Rubric Criteria Breakdown:
+                        </span>
+                        <div className="space-y-1">
+                          {rubricScores.map((rb, rIdx) => (
+                            <div
+                              key={rIdx}
+                              className="flex items-center justify-between text-xs bg-white p-2 rounded-lg border border-slate-200"
+                            >
+                              <div className="flex items-center gap-1.5">
+                                {rb.satisfied ? (
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+                                ) : (
+                                  <XCircle className="w-3.5 h-3.5 text-rose-500 flex-shrink-0" />
+                                )}
+                                <span className="text-slate-700">{rb.criterion}</span>
+                              </div>
+                              <span className="font-bold text-slate-800">
+                                {rb.awarded_marks} / {rb.max_marks} marks
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                     <div>
                       <span className="text-xs font-semibold text-slate-600 block mb-1">

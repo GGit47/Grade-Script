@@ -1,0 +1,19 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Local database
+backend/gradescript.db
+
+# Datasets
+Dataset-1/
+Dataset-1.zip
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Frontend dependencies
+node_modules/
+dist/

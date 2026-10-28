@@ -1,11 +1,20 @@
+export interface RubricItem {
+  criterion: string;
+  marks: number;
+}
+
 export interface Question {
   id?: number;
   question_number: number;
+  question_label?: string;
   question_text: string;
   reference_answer: string;
   max_marks: number;
   essential_keywords?: string;
-  rubric_criteria?: string;
+  rubric_criteria?: string; // JSON string or text
+  partial_credit_rules?: string;
+  alternative_answers?: string; // JSON string or text
+  negative_marking?: number;
 }
 
 export interface Exam {
@@ -20,6 +29,15 @@ export interface Exam {
   questions?: Question[];
 }
 
+export interface CandidateMatch {
+  question_id: number;
+  question_label: string;
+  question_number: number;
+  score: number;
+  reason: string;
+  has_explicit?: boolean;
+}
+
 export interface AnswerRegion {
   id: number;
   page_id: number;
@@ -29,6 +47,12 @@ export interface AnswerRegion {
   recognized_text: string;
   edited_text: string;
   confidence: number;
+  detected_question_label?: string | null;
+  mapping_confidence: number;
+  mapping_method: string;
+  candidate_matches?: string; // JSON string of CandidateMatch[]
+  is_ambiguous: boolean;
+  is_manually_mapped: boolean;
 }
 
 export interface SubmissionPage {
@@ -38,6 +62,13 @@ export interface SubmissionPage {
   image_path: string;
   preprocessed_path?: string;
   regions: AnswerRegion[];
+}
+
+export interface RubricScoreItem {
+  criterion: string;
+  max_marks: number;
+  awarded_marks: number;
+  satisfied: boolean;
 }
 
 export interface EvaluationItem {
@@ -56,6 +87,7 @@ export interface EvaluationItem {
   review_needed: boolean;
   is_teacher_approved: boolean;
   teacher_notes?: string;
+  rubric_scores?: string;      // JSON string of RubricScoreItem[]
 }
 
 export interface SubmissionDetail {
@@ -73,6 +105,28 @@ export interface SubmissionDetail {
   created_at: string;
   pages: SubmissionPage[];
   evaluations: EvaluationItem[];
+}
+
+export interface ParsedQuestionItem {
+  question_number: number;
+  question_label: string;
+  question_text: string;
+  reference_answer: string;
+  max_marks: number;
+  essential_keywords: string;
+  rubric_criteria: RubricItem[];
+  partial_credit_rules?: string;
+  alternative_answers: string[];
+  negative_marking: number;
+  source_page?: number;
+  crop_path?: string;
+}
+
+export interface AnswerKeyParseResponse {
+  questions: ParsedQuestionItem[];
+  unparsed_text: string;
+  page_count: number;
+  method: string;
 }
 
 export interface DashboardStats {

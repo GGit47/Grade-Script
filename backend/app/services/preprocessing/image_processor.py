@@ -4,10 +4,15 @@ from typing import List, Tuple
 from PIL import Image
 
 try:
-    import fitz  # PyMuPDF
+    import pymupdf as fitz  # PyMuPDF
     PYMUPDF_AVAILABLE = True
 except ImportError:
-    PYMUPDF_AVAILABLE = False
+    try:
+        import fitz
+        PYMUPDF_AVAILABLE = True
+    except ImportError:
+        PYMUPDF_AVAILABLE = False
+
 
 try:
     import cv2
