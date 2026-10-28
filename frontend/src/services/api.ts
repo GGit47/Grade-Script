@@ -26,6 +26,7 @@ export const api = {
     questions: {
       question_number: number;
       question_label?: string;
+      question_type?: string;
       question_text: string;
       reference_answer: string;
       max_marks: number;

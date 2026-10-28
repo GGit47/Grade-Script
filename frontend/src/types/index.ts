@@ -7,6 +7,7 @@ export interface Question {
   id?: number;
   question_number: number;
   question_label?: string;
+  question_type?: string;
   question_text: string;
   reference_answer: string;
   max_marks: number;
@@ -110,6 +111,7 @@ export interface SubmissionDetail {
 export interface ParsedQuestionItem {
   question_number: number;
   question_label: string;
+  question_type: string;
   question_text: string;
   reference_answer: string;
   max_marks: number;

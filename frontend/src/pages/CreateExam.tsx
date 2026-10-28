@@ -25,6 +25,7 @@ interface CreateExamProps {
 interface QuestionFormItem {
   question_number: number;
   question_label: string;
+  question_type: string;
   question_text: string;
   reference_answer: string;
   max_marks: number;
@@ -83,6 +84,7 @@ Rubric: 2.5 marks for clock synchronization vs start/stop bits; 2.5 marks for da
         {
           question_number: 1,
           question_label: 'Q1',
+          question_type: 'subjective',
           question_text: '',
           reference_answer: '',
           max_marks: 5,
@@ -107,6 +109,7 @@ Rubric: 2.5 marks for clock synchronization vs start/stop bits; 2.5 marks for da
         const res = await api.parseTextAnswerKey(uploadedFile || undefined, textKeyInput);
         setQuestions(res.questions.map((q) => ({
           ...q,
+          question_type: q.question_type || 'subjective',
           rubric_criteria: q.rubric_criteria || [
             { criterion: 'Core conceptual accuracy', marks: Math.round(q.max_marks / 2) },
             { criterion: 'Detailed explanation and examples', marks: Math.round(q.max_marks / 2) }
@@ -127,6 +130,7 @@ Rubric: 2.5 marks for clock synchronization vs start/stop bits; 2.5 marks for da
         const res = await api.parseScannedAnswerKey(uploadedFile);
         setQuestions(res.questions.map((q) => ({
           ...q,
+          question_type: q.question_type || 'subjective',
           rubric_criteria: q.rubric_criteria || [
             { criterion: 'Accurate definition', marks: Math.round(q.max_marks / 2) },
             { criterion: 'Technical explanation', marks: Math.round(q.max_marks / 2) }
@@ -160,6 +164,7 @@ Rubric: 2.5 marks for clock synchronization vs start/stop bits; 2.5 marks for da
       {
         question_number: nextNum,
         question_label: `Q${nextNum}`,
+        question_type: 'subjective',
         question_text: '',
         reference_answer: '',
         max_marks: 5,
@@ -209,12 +214,12 @@ Rubric: 2.5 marks for clock synchronization vs start/stop bits; 2.5 marks for da
   // Validation before proceeding
   const validateQuestionsReview = () => {
     setError(null);
+    if (!questions || questions.length === 0) {
+      setError('No valid questions detected in answer key. Please enter or upload questions.');
+      return false;
+    }
     for (const q of questions) {
-      if (!q.question_text.trim()) {
-        setError(`Question ${q.question_label || q.question_number} is missing question text.`);
-        return false;
-      }
-      if (!q.reference_answer.trim()) {
+      if (!q.reference_answer || !q.reference_answer.trim()) {
         setError(`Question ${q.question_label || q.question_number} is missing a reference answer.`);
         return false;
       }
@@ -239,8 +244,8 @@ Rubric: 2.5 marks for clock synchronization vs start/stop bits; 2.5 marks for da
         return false;
       }
 
-      // Check sum of rubric criteria
-      if (q.rubric_criteria && q.rubric_criteria.length > 0) {
+      // Check sum of rubric criteria (for subjective questions with multiple criteria)
+      if (q.question_type !== 'mcq' && q.rubric_criteria && q.rubric_criteria.length > 0) {
         const sumMarks = q.rubric_criteria.reduce((s, c) => s + (Number(c.marks) || 0), 0);
         if (sumMarks > q.max_marks + 0.05) {
           setError(
@@ -268,7 +273,8 @@ Rubric: 2.5 marks for clock synchronization vs start/stop bits; 2.5 marks for da
         questions: questions.map((q) => ({
           question_number: q.question_number,
           question_label: q.question_label || `Q${q.question_number}`,
-          question_text: q.question_text,
+          question_type: q.question_type || 'subjective',
+          question_text: q.question_text || `Question ${q.question_number}`,
           reference_answer: q.reference_answer,
           max_marks: Number(q.max_marks),
           essential_keywords: q.essential_keywords,
@@ -468,10 +474,10 @@ Rubric: 2.5 marks for clock synchronization vs start/stop bits; 2.5 marks for da
                     Answer Key Text (Direct Entry or File Upload)
                   </span>
                   <label className="cursor-pointer text-xs font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1">
-                    <Upload className="w-3.5 h-3.5" /> Upload .txt / .docx / .pdf
+                    <Upload className="w-3.5 h-3.5" /> Upload .txt / .csv / .docx / .pdf
                     <input
                       type="file"
-                      accept=".txt,.docx,.pdf"
+                      accept=".txt,.csv,.tsv,.docx,.pdf"
                       className="hidden"
                       onChange={(e) => {
                         if (e.target.files && e.target.files[0]) {
@@ -498,10 +504,17 @@ Rubric: 2.5 marks for clock synchronization vs start/stop bits; 2.5 marks for da
                   rows={8}
                   value={textKeyInput}
                   onChange={(e) => setTextKeyInput(e.target.value)}
-                  placeholder="Enter formatted answer key... e.g.:
-Q1. Define Operating System...
-Answer: An operating system is...
-[Max Marks: 5]"
+                  placeholder={`Format A (Structured Text):
+Q1. Define Operating System and list two functions.
+Answer: An operating system is system software that manages hardware resources...
+[Max Marks: 5]
+Keywords: system software, hardware, resource management
+Rubric: 2 marks for definition; 3 marks for functions
+
+Or Format B (CSV answer keys):
+Question_Number,Type,Correct_Answer
+1,MCQ,B
+21,Short_Answer,"A type of ML where the model is trained on labeled data..."`}
                   className="w-full p-3.5 bg-white border border-slate-300 rounded-xl text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 />
               </div>
@@ -607,8 +620,8 @@ Answer: An operating system is...
                 key={idx}
                 className="p-5 rounded-2xl border border-slate-200 bg-slate-50/50 space-y-4 relative"
               >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="font-bold text-sm text-slate-700 bg-white px-3 py-1 rounded-lg border border-slate-200">
                       #{q.question_number}
                     </span>
@@ -619,6 +632,26 @@ Answer: An operating system is...
                       onChange={(e) => updateQuestion(idx, 'question_label', e.target.value)}
                       className="w-24 px-2 py-1 bg-white border border-slate-300 rounded-lg text-xs font-bold text-blue-700 uppercase"
                     />
+                    <select
+                      value={q.question_type || 'subjective'}
+                      onChange={(e) => updateQuestion(idx, 'question_type', e.target.value)}
+                      className="px-2.5 py-1 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-700 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    >
+                      <option value="subjective">Subjective / Short Answer</option>
+                      <option value="mcq">Multiple Choice (MCQ)</option>
+                    </select>
+                    <div className="flex items-center gap-1.5 ml-2">
+                      <label className="text-xs font-semibold text-slate-600">Max Marks:</label>
+                      <input
+                        type="number"
+                        min="0.5"
+                        max="100"
+                        step="0.5"
+                        value={q.max_marks}
+                        onChange={(e) => updateQuestion(idx, 'max_marks', parseFloat(e.target.value) || 0)}
+                        className="w-16 px-2 py-1 bg-white border border-slate-300 rounded-lg text-xs font-bold text-blue-700 text-center"
+                      />
+                    </div>
                     {q.source_page && (
                       <span className="text-[11px] px-2 py-0.5 bg-indigo-100 text-indigo-800 rounded font-medium">
                         Page {q.source_page}
@@ -649,23 +682,47 @@ Answer: An operating system is...
                     onChange={(e) => updateQuestion(idx, 'question_text', e.target.value)}
                     placeholder="Enter question statement..."
                     className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                    required
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 mb-1">
-                    Reference Answer (Model Answer)
+                    {q.question_type === 'mcq' ? 'Reference Option (e.g. A, B, C, D)' : 'Reference Answer (Model Answer)'}
                   </label>
                   <textarea
-                    rows={3}
+                    rows={q.question_type === 'mcq' ? 1 : 3}
                     value={q.reference_answer}
                     onChange={(e) => updateQuestion(idx, 'reference_answer', e.target.value)}
-                    placeholder="Extracted reference answer text..."
+                    placeholder={q.question_type === 'mcq' ? 'e.g. B' : 'Extracted reference answer text...'}
                     className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                     required
                   />
                 </div>
+
+                {q.question_type !== 'mcq' && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">Keywords</label>
+                      <input
+                        type="text"
+                        value={q.essential_keywords}
+                        onChange={(e) => updateQuestion(idx, 'essential_keywords', e.target.value)}
+                        placeholder="Comma-separated keywords"
+                        className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">
+                        Marking Rubric ({q.rubric_criteria?.length || 0} criteria)
+                      </label>
+                      <div className="text-xs text-slate-600 py-1.5 px-3 bg-white border border-slate-200 rounded-lg truncate">
+                        {q.rubric_criteria && q.rubric_criteria.length > 0
+                          ? q.rubric_criteria.map((c) => `${c.criterion} (${c.marks}m)`).join('; ')
+                          : 'Configurable in next step'}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -757,110 +814,127 @@ Answer: An operating system is...
                     </div>
                   </div>
 
-                  {/* Essential Keywords & Partial Credit */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                        Essential Keywords & Concepts
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. process management, hardware abstraction, kernel"
-                        value={q.essential_keywords}
-                        onChange={(e) => updateQuestion(qIdx, 'essential_keywords', e.target.value)}
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                      />
-                      <span className="text-[11px] text-slate-400">Comma-separated key terms</span>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                        Acceptable Alternative Answers
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Alternative valid solutions or synonyms (semicolon-separated)"
-                        value={Array.isArray(q.alternative_answers) ? q.alternative_answers.join('; ') : q.alternative_answers}
-                        onChange={(e) =>
-                          updateQuestion(
-                            qIdx,
-                            'alternative_answers',
-                            e.target.value.split(';').map((s) => s.trim()).filter(Boolean)
-                          )
-                        }
-
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                      />
-                      <span className="text-[11px] text-slate-400">Alternative phrasings accepted for full credit</span>
-                    </div>
-                  </div>
-
-                  {/* Rubric Criteria Table */}
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-                          Marking Rubric Criteria Breakdown
+                  {q.question_type === 'mcq' ? (
+                    <div className="p-4 bg-blue-50/70 rounded-xl border border-blue-200 flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <span className="px-3 py-1 bg-blue-600 text-white font-bold rounded-lg text-sm uppercase">
+                          Option {q.reference_answer.trim().toUpperCase()}
                         </span>
-                        <span
-                          className={`text-xs px-2 py-0.5 rounded-full font-bold ${
-                            isOverAllocated
-                              ? 'bg-red-100 text-red-800'
-                              : rubricSum === q.max_marks
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : 'bg-blue-100 text-blue-800'
-                          }`}
-                        >
-                          Sum: {rubricSum} / {q.max_marks} marks
+                        <span className="text-xs text-slate-700">
+                          Multiple Choice Question: Evaluated by exact matching of detected option letter against reference option.
                         </span>
                       </div>
-
-                      <button
-                        type="button"
-                        onClick={() => addRubricCriterion(qIdx)}
-                        className="text-xs text-blue-600 hover:text-blue-800 font-bold flex items-center gap-1"
-                      >
-                        <Plus className="w-3.5 h-3.5" /> Add Criterion
-                      </button>
+                      <div className="text-xs font-semibold text-blue-900">
+                        Awards {q.max_marks} marks if correct{q.negative_marking > 0 ? `, -${q.negative_marking} penalty if incorrect` : ''}
+                      </div>
                     </div>
-
-                    <div className="space-y-2">
-                      {q.rubric_criteria.map((c, cIdx) => (
-                        <div key={cIdx} className="flex items-center gap-2 bg-white p-2.5 rounded-xl border border-slate-200">
+                  ) : (
+                    <>
+                      {/* Essential Keywords & Partial Credit */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                            Essential Keywords & Concepts
+                          </label>
                           <input
                             type="text"
-                            value={c.criterion}
-                            onChange={(e) => updateRubricCriterion(qIdx, cIdx, 'criterion', e.target.value)}
-                            placeholder="Criterion description..."
-                            className="flex-1 px-2.5 py-1 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            placeholder="e.g. process management, hardware abstraction, kernel"
+                            value={q.essential_keywords}
+                            onChange={(e) => updateQuestion(qIdx, 'essential_keywords', e.target.value)}
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
                           />
-                          <div className="flex items-center gap-1">
-                            <span className="text-xs text-slate-500">Marks:</span>
-                            <input
-                              type="number"
-                              min="0.5"
-                              max={q.max_marks}
-                              step="0.5"
-                              value={c.marks}
-                              onChange={(e) =>
-                                updateRubricCriterion(qIdx, cIdx, 'marks', parseFloat(e.target.value) || 0)
-                              }
-                              className="w-14 px-2 py-1 text-xs font-bold text-center border border-slate-200 rounded-lg"
-                            />
-                          </div>
-                          {q.rubric_criteria.length > 1 && (
-                            <button
-                              type="button"
-                              onClick={() => removeRubricCriterion(qIdx, cIdx)}
-                              className="p-1 text-slate-400 hover:text-red-500"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
+                          <span className="text-[11px] text-slate-400">Comma-separated key terms</span>
                         </div>
-                      ))}
-                    </div>
-                  </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                            Acceptable Alternative Answers
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="Alternative valid solutions or synonyms (semicolon-separated)"
+                            value={Array.isArray(q.alternative_answers) ? q.alternative_answers.join('; ') : q.alternative_answers}
+                            onChange={(e) =>
+                              updateQuestion(
+                                qIdx,
+                                'alternative_answers',
+                                e.target.value.split(';').map((s) => s.trim()).filter(Boolean)
+                              )
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                          />
+                          <span className="text-[11px] text-slate-400">Alternative phrasings accepted for full credit</span>
+                        </div>
+                      </div>
+
+                      {/* Rubric Criteria Table */}
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                              Marking Rubric Criteria Breakdown
+                            </span>
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full font-bold ${
+                                isOverAllocated
+                                  ? 'bg-red-100 text-red-800'
+                                  : rubricSum === q.max_marks
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-blue-100 text-blue-800'
+                              }`}
+                            >
+                              Sum: {rubricSum} / {q.max_marks} marks
+                            </span>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => addRubricCriterion(qIdx)}
+                            className="text-xs text-blue-600 hover:text-blue-800 font-bold flex items-center gap-1"
+                          >
+                            <Plus className="w-3.5 h-3.5" /> Add Criterion
+                          </button>
+                        </div>
+
+                        <div className="space-y-2">
+                          {q.rubric_criteria.map((c, cIdx) => (
+                            <div key={cIdx} className="flex items-center gap-2 bg-white p-2.5 rounded-xl border border-slate-200">
+                              <input
+                                type="text"
+                                value={c.criterion}
+                                onChange={(e) => updateRubricCriterion(qIdx, cIdx, 'criterion', e.target.value)}
+                                placeholder="Criterion description..."
+                                className="flex-1 px-2.5 py-1 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500"
+                              />
+                              <div className="flex items-center gap-1">
+                                <span className="text-xs text-slate-500">Marks:</span>
+                                <input
+                                  type="number"
+                                  min="0.5"
+                                  max={q.max_marks}
+                                  step="0.5"
+                                  value={c.marks}
+                                  onChange={(e) =>
+                                    updateRubricCriterion(qIdx, cIdx, 'marks', parseFloat(e.target.value) || 0)
+                                  }
+                                  className="w-14 px-2 py-1 text-xs font-bold text-center border border-slate-200 rounded-lg"
+                                />
+                              </div>
+                              {q.rubric_criteria.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => removeRubricCriterion(qIdx, cIdx)}
+                                  className="p-1 text-slate-400 hover:text-red-500"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               );
             })}
