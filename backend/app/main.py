@@ -3,13 +3,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.database.session import engine, Base
+from app.database.session import engine, Base, run_migrations
 from app.api.routes import router as api_router
 from app.services.handwriting.ocr_engine import handwriting_service
 from app.services.grading.engine import grading_engine
 
-# Initialize SQLite tables
+# Initialize SQLite tables and migrations
 Base.metadata.create_all(bind=engine)
+run_migrations()
 
 app = FastAPI(
     title="Grade Script API",

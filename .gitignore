@@ -13,6 +13,8 @@ Dataset-1.zip
 .env
 .env.*
 !.env.example
+.venv/
+venv/
 
 # Frontend dependencies
 node_modules/

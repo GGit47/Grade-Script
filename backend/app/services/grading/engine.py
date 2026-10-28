@@ -108,21 +108,102 @@ class GradingEngine:
         essential_keywords_str: str = "",
         rubric_criteria: str = "",
         alternative_answers_str: str = "",
-        negative_marking: float = 0.0
+        negative_marking: float = 0.0,
+        question_type: str = "subjective"
     ) -> Dict[str, Any]:
         """
         Evaluates answer using multi-factor transparent criteria:
         1. Blank or unreadable checks
-        2. Essential concept coverage ratio (40% weight)
-        3. Semantic similarity score (50% weight) - checks primary reference answer and acceptable alternatives
-        4. Length/completeness heuristic (10% weight)
-        5. Rubric-based partial-credit allocation if structured criteria configured
-        6. Optional negative marking penalty for incorrect/unanswered questions
+        2. MCQ option matching for multiple-choice questions
+        3. Essential concept coverage ratio (40% weight)
+        4. Semantic similarity score (50% weight) - checks primary reference answer and acceptable alternatives
+        5. Length/completeness heuristic (10% weight)
+        6. Rubric-based partial-credit allocation if structured criteria configured
+        7. Optional negative marking penalty for incorrect/unanswered questions
         """
         raw_lower = (student_text or "").lower()
         norm_student = self.normalize_text(student_text)
+
+        # Check if question is an MCQ
+        is_mcq = (question_type.lower() == "mcq") or bool(
+            re.match(r"^[A-Fa-f]$", reference_text.strip())
+            or re.match(r"^\([A-Fa-f]\)$", reference_text.strip())
+        )
+
+        if is_mcq:
+            # Case MCQ Blank / Empty
+            if (
+                not norm_student
+                or "[blank" in raw_lower
+                or "[unreadable" in raw_lower
+                or norm_student.startswith("blank")
+                or norm_student.startswith("unreadable")
+            ):
+                ref_clean = reference_text.strip().upper()
+                msg = f"Unanswered: No student answer detected for this MCQ (expected '{ref_clean}')."
+                return {
+                    "suggested_marks": 0.0,
+                    "concepts_identified": [],
+                    "missing_concepts": [f"Option {ref_clean}"],
+                    "semantic_similarity": 0.0,
+                    "rationale": msg,
+                    "feedback": msg,
+                    "review_needed": True,
+                    "rubric_scores": []
+                }
+
+            # Extract student option letter
+            opt_match = re.search(r"(?:^|[\s\(\[\:\.\-])([A-Fa-f])(?:[\)\]\.\s\:\-]|$)", student_text.strip())
+            if not opt_match:
+                words = re.findall(r"\b[A-Fa-f]\b", student_text.strip())
+                student_opt = words[0].upper() if words else student_text.strip().upper()
+            else:
+                student_opt = opt_match.group(1).upper()
+
+            ref_match = re.search(r"\b([A-Fa-f])\b", reference_text.strip())
+            ref_opt = ref_match.group(1).upper() if ref_match else reference_text.strip().upper()
+
+            if student_opt == ref_opt:
+                msg = f"Correct MCQ option selected: {ref_opt} (matches reference '{ref_opt}')."
+                return {
+                    "suggested_marks": max_marks,
+                    "concepts_identified": [f"Option {ref_opt}"],
+                    "missing_concepts": [],
+                    "semantic_similarity": 1.0,
+                    "rationale": msg,
+                    "feedback": msg,
+                    "review_needed": False,
+                    "rubric_scores": [
+                        {
+                            "criterion": f"Correct MCQ option ({ref_opt})",
+                            "max_marks": max_marks,
+                            "awarded_marks": max_marks,
+                            "satisfied": True
+                        }
+                    ]
+                }
+            else:
+                penalized = -abs(negative_marking) if negative_marking > 0 else 0.0
+                msg = f"Incorrect MCQ option: selected '{student_opt}', does not match reference '{ref_opt}'."
+                return {
+                    "suggested_marks": penalized,
+                    "concepts_identified": [],
+                    "missing_concepts": [f"Option {ref_opt}"],
+                    "semantic_similarity": 0.0,
+                    "rationale": msg,
+                    "feedback": msg,
+                    "review_needed": False,
+                    "rubric_scores": [
+                        {
+                            "criterion": f"Correct MCQ option ({ref_opt})",
+                            "max_marks": max_marks,
+                            "awarded_marks": 0.0,
+                            "satisfied": False
+                        }
+                    ]
+                }
         
-        # Case 1: Empty or blank answer
+        # Case 1: Empty or blank answer (Subjective)
         if (
             not norm_student
             or "[blank" in raw_lower
@@ -131,12 +212,14 @@ class GradingEngine:
             or norm_student.startswith("unreadable")
         ):
             kws = [kw.strip() for kw in essential_keywords_str.split(",") if kw.strip()]
+            blank_msg = "No readable answer provided or answer space was left blank."
             return {
                 "suggested_marks": 0.0,
                 "concepts_identified": [],
                 "missing_concepts": kws,
                 "semantic_similarity": 0.0,
-                "rationale": "No readable answer provided or answer space was left blank.",
+                "rationale": blank_msg,
+                "feedback": blank_msg,
                 "review_needed": True,
                 "rubric_scores": []
             }
@@ -263,6 +346,7 @@ class GradingEngine:
             "missing_concepts": missing_concepts,
             "semantic_similarity": round(best_sim, 3),
             "rationale": rationale,
+            "feedback": rationale,
             "review_needed": review_needed,
             "rubric_scores": rubric_scores
         }

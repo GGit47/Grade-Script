@@ -112,14 +112,27 @@ def crop_image_region(image_path: str, output_path: str, bbox: Tuple[float, floa
 
 def auto_segment_answer_blocks(image_path: str, num_questions: int = 1) -> List[Tuple[float, float, float, float]]:
     """
-    Heuristic-based initial horizontal section partition for answer sheets.
-    Divides the page height into sensible blocks if automatic detection is requested.
+    Intelligently partitions answer sheet into answer regions.
+    Detects blank pages and returns empty list to avoid creating phantom regions.
     Returns list of normalized bboxes [ymin, xmin, ymax, xmax].
     """
+    if OPENCV_AVAILABLE and os.path.exists(image_path):
+        try:
+            img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                # Check if page is blank
+                _, thresh = cv2.threshold(img, 220, 255, cv2.THRESH_BINARY_INV)
+                ink_pixels = int(np.sum(thresh > 0))
+                total_pixels = img.shape[0] * img.shape[1]
+                if ink_pixels < (total_pixels * 0.0008):  # less than 0.08% ink -> blank page
+                    return []
+        except Exception:
+            pass
+
     if num_questions <= 0:
         num_questions = 1
 
-    # Leave a 5% margin on top/bottom/sides
+    # Leave margins
     margin_x = 0.04
     margin_y = 0.05
     usable_h = 1.0 - (2 * margin_y)

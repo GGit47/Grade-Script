@@ -24,6 +24,7 @@ class Question(Base):
     exam_id = Column(Integer, ForeignKey("exams.id"), nullable=False)
     question_number = Column(Integer, nullable=False)
     question_label = Column(String(50), default="")  # e.g. "Q1", "1(a)", "2"
+    question_type = Column(String(50), default="subjective")  # "subjective", "mcq"
     question_text = Column(Text, nullable=False)
     reference_answer = Column(Text, nullable=False)
     max_marks = Column(Float, nullable=False)

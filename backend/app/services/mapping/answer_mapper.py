@@ -18,47 +18,64 @@ class AnswerMapper:
     @staticmethod
     def extract_detected_identifier(text: str) -> Tuple[Optional[str], Optional[int], Optional[str], str]:
         """
-        Inspects the recognized text (especially the first few lines) for question identifiers.
+        Inspects the recognized text (across the first few lines) for question identifiers.
         Returns:
             (normalized_label, numeric_id, subquestion_id, cleaned_body_text)
         Examples:
             "Q3. Gradient descent is an optimization..." -> ("Q3", 3, None, "Gradient descent is...")
             "1(a) Supervised learning is..." -> ("Q1(a)", 1, "a", "Supervised learning is...")
             "Ans 2: Overfitting occurs..." -> ("Q2", 2, None, "Overfitting occurs...")
+            "21\nSupervised learning..." -> ("Q21", 21, None, "Supervised learning...")
         """
         if not text:
             return None, None, None, ""
 
-        lines = text.strip().splitlines()
-        first_line = lines[0].strip() if lines else ""
+        lines = [l.strip() for l in text.strip().splitlines()]
+        if not lines:
+            return None, None, None, ""
 
-        # Pattern 1: Q1, Q.1, Question 1, Q1(a), Q2b, Ans 1, Ans: 1
-        # Subquestion identifier must be in parens (e.g. (a), (1), (i)) or single letter right after digit
-        p1 = re.match(
-            r"^(?:Q(?:uestion)?|Ans(?:wer)?)\.?\s*(\d+)(?:\s*(?:\(([a-zA-Z0-9]{1,3})\)|([a-zA-Z]))(?=\s*[:\.\-]|\s|$))?\s*[:\.\-]?\s*(.*)$",
-            first_line,
-            re.IGNORECASE
-        )
-        if p1:
-            q_num = int(p1.group(1))
-            sub_id = p1.group(2) or p1.group(3)
-            rest = p1.group(4) or ""
-            norm_label = f"Q{q_num}({sub_id})" if sub_id else f"Q{q_num}"
-            remaining_text = "\n".join([rest] + lines[1:]).strip()
-            return norm_label, q_num, sub_id, remaining_text
+        for line_idx in range(min(3, len(lines))):
+            line = lines[line_idx]
+            if not line:
+                continue
 
-        # Pattern 2: 1., 1), 1(a), 2(b) at start of text
-        p2 = re.match(
-            r"^(\d+)\s*(?:(?:\(([a-zA-Z0-9]{1,3})\))|([a-zA-Z])(?=\s*[:\.\-]|\s|$)|[\.\)])\s*[:\.\-]?\s*(.*)$",
-            first_line
-        )
-        if p2:
-            q_num = int(p2.group(1))
-            sub_id = p2.group(2) or p2.group(3)
-            rest = p2.group(4) or ""
-            norm_label = f"Q{q_num}({sub_id})" if sub_id else f"Q{q_num}"
-            remaining_text = "\n".join([rest] + lines[1:]).strip()
-            return norm_label, q_num, sub_id, remaining_text
+            # Pattern 1: Q1, Q.1, Question 1, Q1(a), Q2b, Ans 1, Ans: 1, Ans. 1, No. 1
+            p1 = re.match(
+                r"^(?:(?:Q(?:uestion)?|Ans(?:wer)?|No)\.?\s*[:\.\-]?\s*)(\d+)(?:\s*(?:\(([a-zA-Z0-9]{1,3})\)|([a-zA-Z]))(?=\s*[:\.\-]|\s|$))?\s*[:\.\-]?\s*(.*)$",
+                line,
+                re.IGNORECASE
+            )
+            if p1:
+                q_num = int(p1.group(1))
+                sub_id = p1.group(2) or p1.group(3)
+                rest = p1.group(4) or ""
+                norm_label = f"Q{q_num}({sub_id})" if sub_id else f"Q{q_num}"
+                rem_lines = lines[:line_idx] + ([rest] if rest else []) + lines[line_idx+1:]
+                remaining_text = "\n".join([l for l in rem_lines if l]).strip()
+                return norm_label, q_num, sub_id, remaining_text
+
+            # Pattern 2: 1., 1), 1(a), 2(b), 1: at start of text
+            p2 = re.match(
+                r"^(\d+)\s*(?:(?:\(([a-zA-Z0-9]{1,3})\))|([a-zA-Z])(?=\s*[:\.\-]|\s|$)|[\.\)\:\-])\s*[:\.\-]?\s*(.*)$",
+                line
+            )
+            if p2:
+                q_num = int(p2.group(1))
+                sub_id = p2.group(2) or p2.group(3)
+                rest = p2.group(4) or ""
+                norm_label = f"Q{q_num}({sub_id})" if sub_id else f"Q{q_num}"
+                rem_lines = lines[:line_idx] + ([rest] if rest else []) + lines[line_idx+1:]
+                remaining_text = "\n".join([l for l in rem_lines if l]).strip()
+                return norm_label, q_num, sub_id, remaining_text
+
+            # Pattern 3: Standalone number on the line, e.g. "21" or "Q21"
+            p3 = re.match(r"^(?:Q(?:uestion)?\.?\s*)?(\d+)\s*$", line, re.IGNORECASE)
+            if p3:
+                q_num = int(p3.group(1))
+                norm_label = f"Q{q_num}"
+                rem_lines = lines[:line_idx] + lines[line_idx+1:]
+                remaining_text = "\n".join([l for l in rem_lines if l]).strip()
+                return norm_label, q_num, None, remaining_text
 
         return None, None, None, text
 
@@ -95,7 +112,7 @@ class AnswerMapper:
                     ref_label = (q.question_label or f"Q{q.question_number}").upper()
                     
                     if norm_det == ref_label or norm_det == f"Q{q.question_number}" or (num_id == q.question_number and not sub_id):
-                        score += 0.90
+                        score += 0.95
                         reasons.append(f"Explicit identifier match '{det_label}'")
                         has_explicit_match = True
                     elif num_id == q.question_number and sub_id:
@@ -109,25 +126,34 @@ class AnswerMapper:
 
                 # Signal B: Semantic question prompt matching
                 content_text = cleaned_text or raw_text
-                if content_text and q.question_text:
+                if content_text and q.question_text and q.question_text != "[Question text unavailable]":
                     sim_q = grading_engine.compute_semantic_similarity(content_text[:120], q.question_text)
                     if sim_q > 0.30:
                         score += (sim_q * 0.40)
                         reasons.append(f"Prompt semantic similarity ({sim_q:.2f})")
 
-                # Signal C: Answer-content semantic compatibility
+                # Signal C: Answer-content semantic compatibility / MCQ option matching
+                is_mcq_q = (getattr(q, "question_type", "subjective") == "mcq") or bool(re.match(r"^[A-Fa-f]$", (q.reference_answer or "").strip()))
+
                 if content_text and q.reference_answer:
-                    sim_ans = grading_engine.compute_semantic_similarity(content_text, q.reference_answer)
-                    matched_kws, _ = grading_engine.extract_and_match_concepts(
-                        content_text, q.essential_keywords or "", q.reference_answer
-                    )
-                    kw_boost = min(0.35, len(matched_kws) * 0.12)
-                    content_score = (sim_ans * 0.45) + kw_boost
-                    score += content_score
-                    if sim_ans > 0.30:
-                        reasons.append(f"Answer semantic match ({sim_ans:.2f})")
-                    if matched_kws:
-                        reasons.append(f"Matched concepts ({', '.join(matched_kws[:3])})")
+                    if is_mcq_q:
+                        opt_match = re.search(r"\b([A-Fa-f])\b", content_text)
+                        ref_opt = re.search(r"\b([A-Fa-f])\b", q.reference_answer)
+                        if opt_match and ref_opt and opt_match.group(1).upper() == ref_opt.group(1).upper():
+                            score += 0.60
+                            reasons.append(f"MCQ option match ({ref_opt.group(1).upper()})")
+                    else:
+                        sim_ans = grading_engine.compute_semantic_similarity(content_text, q.reference_answer)
+                        matched_kws, _ = grading_engine.extract_and_match_concepts(
+                            content_text, q.essential_keywords or "", q.reference_answer
+                        )
+                        kw_boost = min(0.35, len(matched_kws) * 0.12)
+                        content_score = (sim_ans * 0.45) + kw_boost
+                        score += content_score
+                        if sim_ans > 0.30:
+                            reasons.append(f"Answer semantic match ({sim_ans:.2f})")
+                        if matched_kws:
+                            reasons.append(f"Matched concepts ({', '.join(matched_kws[:3])})")
 
                 final_score = min(1.0, max(0.0, score))
                 reason_str = "; ".join(reasons) if reasons else "Low semantic correlation"

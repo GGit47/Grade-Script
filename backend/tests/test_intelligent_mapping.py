@@ -167,3 +167,110 @@ def test_duplicate_and_ambiguity_detection():
     results = AnswerMapper.match_regions_to_questions(regions, [q1])
     # Both claim Q1 -> duplicate ambiguity detected!
     assert any(r["is_ambiguous"] or r["mapping_method"] == "duplicate_detected" for r in results)
+
+
+def test_standalone_number_identifier_extraction():
+    label, num, sub, body = AnswerMapper.extract_detected_identifier("21\nA type of ML where the model is trained on labeled data.")
+    assert label == "Q21"
+    assert num == 21
+    assert "A type of ML" in body
+
+    label2, num2, sub2, body2 = AnswerMapper.extract_detected_identifier("22.\nOverfitting is when a model memorizes data.")
+    assert label2 == "Q22"
+    assert num2 == 22
+    assert "Overfitting is when" in body2
+
+
+def test_real_exam_out_of_order_student_answers():
+    """
+    Simulates Student_2 answering questions 21, 22, 25, 28, 33 out of numerical order.
+    Verifies that each answer is mapped to its matching reference question.
+    """
+    ref_dict = {
+        21: ("A type of ML where the model is trained on labeled data with known inputs and outputs.", "labeled data, inputs, outputs"),
+        22: ("Overfitting; the model has memorized the training data but failed to generalize.", "overfitting, memorized, generalize"),
+        23: ("A statistical process for estimating the relationships between variables.", "statistical process, relationships"),
+        24: ("Data quality/missing values, overfitting/underfitting, data collection.", "data quality, missing values"),
+        25: ("Healthcare/disease prediction, Finance/fraud detection, E-commerce.", "healthcare, finance, fraud detection"),
+        26: ("Structured is organized in rows/columns; Semi-structured has some markers.", "structured, rows, columns"),
+        27: ("Detection: Z-score, IQR. Handling: Trimming, Capping, Imputation.", "z-score, iqr, trimming, imputation"),
+        28: ("The steps taken to clean and transform raw data into a format suitable for ML.", "clean, transform raw data, format"),
+        29: ("K-NN is distance-based; features with larger scales will dominate.", "k-nn, distance-based, scales"),
+        30: ("By grouping values into bins or intervals.", "grouping, bins, intervals"),
+        31: ("The predefined number of clusters.", "clusters, groups"),
+        32: ("K in K-NN, Learning Rate, Number of Estimators.", "k-nn, learning rate"),
+        33: ("An optimization algorithm used to minimize the cost function.", "optimization, minimize, cost function"),
+        34: ("Discussion on maximizing the margin.", "maximizing, margin"),
+        35: ("It transforms data into a higher-dimensional space.", "higher-dimensional space, non-linear")
+    }
+
+    questions = [
+        Question(
+            id=1000 + qnum,
+            question_number=qnum,
+            question_label=f"Q{qnum}",
+            question_type="subjective",
+            question_text="[Question text unavailable]",
+            reference_answer=ref[0],
+            max_marks=2.0,
+            essential_keywords=ref[1]
+        )
+        for qnum, ref in ref_dict.items()
+    ]
+
+    # Student written answers out of numerical order: 22, 21, 25, 33, 28
+    student_regions = [
+        {
+            "id": 1,
+            "text": "22\nOverfitting: when model fits training data too well and performs poorly on new test data.",
+            "crop_path": "uploads/crops/crop_1.jpg",
+            "page_number": 2
+        },
+        {
+            "id": 2,
+            "text": "21\nSupervised ML where algorithm trains using labeled input-output examples.",
+            "crop_path": "uploads/crops/crop_2.jpg",
+            "page_number": 2
+        },
+        {
+            "id": 3,
+            "text": "25\n1. Disease diagnosis in Healthcare. 2. Fraud detection in Banking and Finance.",
+            "crop_path": "uploads/crops/crop_3.jpg",
+            "page_number": 3
+        },
+        {
+            "id": 4,
+            "text": "33\nGradient descent optimization algorithm minimizing cost function iteratively.",
+            "crop_path": "uploads/crops/crop_4.jpg",
+            "page_number": 3
+        },
+        {
+            "id": 5,
+            "text": "28\nData preprocessing: cleaning, transforming, and standardizing raw dataset.",
+            "crop_path": "uploads/crops/crop_5.jpg",
+            "page_number": 3
+        }
+    ]
+
+    mappings = AnswerMapper.match_regions_to_questions(student_regions, questions)
+    assert len(mappings) == 5
+
+    # Check that region 1 mapped to Q22
+    assert mappings[0]["assigned_question_id"] == 1022
+    assert mappings[0]["detected_label"] == "Q22"
+
+    # Region 2 mapped to Q21
+    assert mappings[1]["assigned_question_id"] == 1021
+    assert mappings[1]["detected_label"] == "Q21"
+
+    # Region 3 mapped to Q25
+    assert mappings[2]["assigned_question_id"] == 1025
+    assert mappings[2]["detected_label"] == "Q25"
+
+    # Region 4 mapped to Q33
+    assert mappings[3]["assigned_question_id"] == 1033
+    assert mappings[3]["detected_label"] == "Q33"
+
+    # Region 5 mapped to Q28
+    assert mappings[4]["assigned_question_id"] == 1028
+    assert mappings[4]["detected_label"] == "Q28"

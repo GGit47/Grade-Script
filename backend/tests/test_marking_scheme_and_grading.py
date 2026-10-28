@@ -72,3 +72,38 @@ def test_negative_marking():
     )
     # Completely irrelevant answer should receive 0 marks
     assert res["suggested_marks"] == 0.0
+
+
+def test_mcq_evaluation_correct():
+    res = grading_engine.evaluate_answer(
+        student_text="Option B",
+        reference_text="B",
+        max_marks=1.0,
+        question_type="mcq"
+    )
+    assert res["suggested_marks"] == 1.0
+    assert res["review_needed"] is False
+    assert "matches reference 'B'" in res["feedback"]
+
+
+def test_mcq_evaluation_incorrect():
+    res = grading_engine.evaluate_answer(
+        student_text="C",
+        reference_text="B",
+        max_marks=1.0,
+        negative_marking=0.25,
+        question_type="mcq"
+    )
+    assert res["suggested_marks"] == -0.25
+    assert "does not match reference 'B'" in res["feedback"]
+
+
+def test_mcq_evaluation_missing_or_unclear():
+    res = grading_engine.evaluate_answer(
+        student_text="[Blank or empty answer region]",
+        reference_text="B",
+        max_marks=1.0,
+        question_type="mcq"
+    )
+    assert res["suggested_marks"] == 0.0
+    assert res["review_needed"] is True

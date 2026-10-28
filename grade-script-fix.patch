@@ -1,0 +1,639 @@
+diff --git a/backend/app/api/routes.py b/backend/app/api/routes.py
+index f373e31..9ab3bbb 100644
+--- a/backend/app/api/routes.py
++++ b/backend/app/api/routes.py
+@@ -17,9 +17,10 @@ from app.schemas.schemas import (
+     AnswerKeyParseResponse
+ )
+ from app.services.preprocessing.image_processor import (
+-    render_pdf_to_images, preprocess_image, crop_image_region, auto_segment_answer_blocks
++    render_pdf_to_images, preprocess_image, crop_image_region, segment_text_lines
+ )
+-from app.services.handwriting.ocr_engine import handwriting_service
++from app.services.handwriting.ocr_engine import handwriting_service, OCRUnavailableError
++from app.services.mapping.line_grouper import group_lines_into_answers
+ from app.services.grading.engine import grading_engine
+ from app.services.reporting.pdf_generator import generate_pdf_report
+ from app.services.answer_key.parser import AnswerKeyParser
+@@ -267,13 +268,12 @@ async def upload_submission(
+             f.write(content)
+         page_paths = [dest]
+ 
+-    # Preprocess and segment answer regions across pages
++    # Preprocess pages and detect individual handwritten lines (TrOCR is a line-level model)
+     questions = sorted(exam.questions, key=lambda q: q.question_number)
+-    num_q = max(1, len(questions))
+-
+-    created_regions = []
+-    regions_matching_payload = []
++    max_qn = max((q.question_number for q in questions), default=None)
+ 
++    page_records = []   # (page_record, prep_path)
++    page_lines = []     # [{"page_idx", "bboxes", "crops", "texts"}]
+     for p_idx, p_path in enumerate(page_paths):
+         prep_path = os.path.join(pages_output_dir, f"prep_page_{p_idx + 1}.jpg")
+         preprocess_image(p_path, prep_path)
+@@ -287,36 +287,67 @@ async def upload_submission(
+         db.add(page_record)
+         db.commit()
+         db.refresh(page_record)
++        page_records.append((page_record, prep_path))
+ 
+-        # Segment regions
+-        bboxes = auto_segment_answer_blocks(prep_path, num_questions=num_q if len(page_paths) == 1 else 2)
+-        for r_idx, bbox in enumerate(bboxes):
+-            crop_filename = f"crop_s{submission.id}_p{page_record.id}_r{r_idx+1}.jpg"
+-            crop_path = os.path.join(CROPS_DIR, crop_filename)
++        bboxes = segment_text_lines(prep_path)
++        crops = []
++        for l_idx, bbox in enumerate(bboxes):
++            crop_path = os.path.join(CROPS_DIR, f"line_s{submission.id}_p{page_record.id}_l{l_idx + 1}.jpg")
+             crop_image_region(prep_path, crop_path, bbox)
++            crops.append(crop_path)
++        page_lines.append({"page_idx": p_idx, "bboxes": bboxes, "crops": crops, "texts": []})
+ 
+-            # Recognize handwriting with TrOCR
+-            text = handwriting_service.recognize_crop(crop_path)
++    total_lines = sum(len(pl["crops"]) for pl in page_lines)
++    if total_lines == 0:
++        submission.status = "failed"
++        db.commit()
++        raise HTTPException(status_code=422, detail="No handwriting was detected in the uploaded file. Check the scan quality.")
+ 
+-            region = AnswerRegion(
+-                page_id=page_record.id,
+-                crop_path=crop_path,
+-                bbox=json.dumps(bbox),
+-                recognized_text=text,
+-                edited_text=text,
+-                confidence=0.85 if text else 0.0
+-            )
+-            db.add(region)
+-            db.commit()
+-            db.refresh(region)
++    # Recognize every line in one batched pass; never fabricate text if the model is missing
++    try:
++        all_texts = handwriting_service.recognize_lines([c for pl in page_lines for c in pl["crops"]])
++    except OCRUnavailableError as e:
++        submission.status = "failed"
++        db.commit()
++        raise HTTPException(status_code=503, detail=str(e))
+ 
+-            created_regions.append(region)
+-            regions_matching_payload.append({
+-                "id": region.id,
+-                "text": text,
+-                "crop_path": crop_path,
+-                "page_number": p_idx + 1
+-            })
++    cursor = 0
++    for pl in page_lines:
++        n = len(pl["crops"])
++        pl["texts"] = all_texts[cursor:cursor + n]
++        cursor += n
++
++    # Group lines into answers using the question numbers the student wrote
++    groups = group_lines_into_answers(page_lines, max_question_number=max_qn)
++
++    created_regions = []
++    regions_matching_payload = []
++    for g in groups:
++        page_record, prep_path = page_records[g["page_idx"]]
++        r_idx = len(created_regions) + 1
++        crop_path = os.path.join(CROPS_DIR, f"crop_s{submission.id}_p{page_record.id}_r{r_idx}.jpg")
++        crop_image_region(prep_path, crop_path, g["bbox"])
++        text = g["text"]
++
++        region = AnswerRegion(
++            page_id=page_record.id,
++            crop_path=crop_path,
++            bbox=json.dumps(g["bbox"]),
++            recognized_text=text,
++            edited_text=text,
++            confidence=0.85 if text else 0.0
++        )
++        db.add(region)
++        db.commit()
++        db.refresh(region)
++
++        created_regions.append(region)
++        regions_matching_payload.append({
++            "id": region.id,
++            "text": text,
++            "crop_path": crop_path,
++            "page_number": g["page_idx"] + 1
++        })
+ 
+     # Run Intelligent Answer-to-Question Mapping (order-independent, multi-signal)
+     mapping_results = answer_mapper.match_regions_to_questions(regions_matching_payload, questions)
+@@ -333,6 +364,8 @@ async def upload_submission(
+         reg.mapping_method = m_res["mapping_method"]
+         reg.candidate_matches = json.dumps(m_res["candidate_matches"])
+         reg.is_ambiguous = m_res["is_ambiguous"]
++        if m_res["detected_label"] and m_res["cleaned_text"]:
++            reg.edited_text = m_res["cleaned_text"]  # grade the answer body, not the "21," label
+ 
+         if assigned_qid:
+             matched_q_ids.add(assigned_qid)
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 030aaad..a6093db 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -36,8 +36,12 @@ app.include_router(api_router, prefix="/api")
+ 
+ @app.on_event("startup")
+ async def startup_event():
+-    # Models will be lazily loaded or warmed up asynchronously in the background
+-    pass
++    # Warm up both models in the background so the first upload does not pay the load/download cost.
++    import threading
++    def _warm():
++        handwriting_service.load_model()
++        grading_engine.load_embedder()
++    threading.Thread(target=_warm, daemon=True).start()
+ 
+ @app.get("/api/health")
+ 
+@@ -46,5 +50,6 @@ def health_check():
+         "status": "healthy",
+         "ocr_device": handwriting_service.device,
+         "ocr_loaded": handwriting_service._loaded,
++        "ocr_error": handwriting_service._load_error,
+         "grading_loaded": grading_engine._embedder_loaded
+     }
+diff --git a/backend/app/services/answer_key/parser.py b/backend/app/services/answer_key/parser.py
+index 76c52cb..0b740a8 100644
+--- a/backend/app/services/answer_key/parser.py
++++ b/backend/app/services/answer_key/parser.py
+@@ -89,10 +89,13 @@ class AnswerKeyParser:
+         )
+         
+         # Regex to detect answer start:
+-        ans_pattern = re.compile(r"^(?:Ans(?:wer)?|Reference\s*Ans(?:wer)?|Model\s*Ans(?:wer)?)\s*[:\.\-]\s*(.*)$", re.IGNORECASE)
++        ans_pattern = re.compile(r"^(?:Ans(?:wer)?|Correct\s*Ans(?:wer)?|Reference\s*Ans(?:wer)?|Model\s*Ans(?:wer)?)\s*[:\.\-]\s*(.*)$", re.IGNORECASE)
++
++        # Metadata / section lines that are not part of any question or answer
++        skip_pattern = re.compile(r"^(?:Question\s*Type\s*:|Part\s+[IVXivx\d]+\s*:)", re.IGNORECASE)
+         
+         # Regex to extract marks:
+-        marks_pattern = re.compile(r"\[(?:Max\s*Marks?|Marks?|M)\s*[:=]?\s*(\d+(?:\.\d+)?)\]|\((\d+(?:\.\d+)?)\s*(?:marks?|m)\)", re.IGNORECASE)
++        marks_pattern = re.compile(r"\[(?:Max\s*Marks?|Marks?|M)\s*[:=]?\s*(\d+(?:\.\d+)?)\]|\((\d+(?:\.\d+)?)\s*(?:marks?|m)\)|^\s*Max(?:imum)?\s*Marks?\s*[:=]\s*(\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
+ 
+         # Regex to extract keywords:
+         keywords_pattern = re.compile(r"^(?:Keywords?|Essential\s*Concepts?)\s*[:\.\-]\s*(.*)$", re.IGNORECASE)
+@@ -148,13 +151,13 @@ class AnswerKeyParser:
+             is_capturing_answer = False
+ 
+         for line in lines:
+-            if not line:
++            if not line or skip_pattern.match(line):
+                 continue
+ 
+             # First, check for marks anywhere in the line
+             m_search = marks_pattern.search(line)
+             if m_search:
+-                m_val = m_search.group(1) or m_search.group(2)
++                m_val = m_search.group(1) or m_search.group(2) or m_search.group(3)
+                 if m_val:
+                     current_max_marks = float(m_val)
+                 line = marks_pattern.sub("", line).strip()
+diff --git a/backend/app/services/grading/engine.py b/backend/app/services/grading/engine.py
+index d44c47e..3b42ec5 100644
+--- a/backend/app/services/grading/engine.py
++++ b/backend/app/services/grading/engine.py
+@@ -119,6 +119,23 @@ class GradingEngine:
+         5. Rubric-based partial-credit allocation if structured criteria configured
+         6. Optional negative marking penalty for incorrect/unanswered questions
+         """
++        # MCQ shortcut: key looks like "B. Little or no autocorrelation", student wrote a letter
++        mcq_ref = re.match(r"^\s*([A-Ea-e])\s*[\.\)]\s*\S", reference_text or "")
++        mcq_stu = re.match(r"^\s*\(?([A-Ea-e])\)?\s*[\.\):,]?\s*$", student_text or "")
++        if mcq_ref and mcq_stu:
++            correct_letter = mcq_ref.group(1).upper()
++            given = mcq_stu.group(1).upper()
++            ok = given == correct_letter
++            return {
++                "suggested_marks": float(max_marks) if ok else 0.0,
++                "concepts_identified": [correct_letter] if ok else [],
++                "missing_concepts": [] if ok else [correct_letter],
++                "semantic_similarity": 1.0 if ok else 0.0,
++                "rationale": f"MCQ: student chose {given}; correct option is {correct_letter}." + ("" if ok else " Verify the handwritten letter was read correctly."),
++                "review_needed": not ok,
++                "rubric_scores": []
++            }
++
+         raw_lower = (student_text or "").lower()
+         norm_student = self.normalize_text(student_text)
+         
+diff --git a/backend/app/services/handwriting/ocr_engine.py b/backend/app/services/handwriting/ocr_engine.py
+index d8ffa2f..2ec4112 100644
+--- a/backend/app/services/handwriting/ocr_engine.py
++++ b/backend/app/services/handwriting/ocr_engine.py
+@@ -1,76 +1,112 @@
+ import os
+-import torch
+-from PIL import Image
+-from typing import Optional, List
++import threading
+ import logging
++from typing import List
++
++import numpy as np
++from PIL import Image
+ 
+ logger = logging.getLogger(__name__)
+ 
++
++class OCRUnavailableError(RuntimeError):
++    """Raised when the handwriting model could not be loaded, so we never return fake text."""
++
++
+ class HandwritingRecognizer:
++    """
++    TrOCR line-level handwriting recognizer.
++
++    The model is loaded lazily on first use (and can be warmed up at startup), and
++    this class NEVER returns made-up text: if the model is unavailable it raises
++    OCRUnavailableError so the API can report the real problem.
++    """
+     _instance = None
+ 
+     def __new__(cls):
+         if cls._instance is None:
+-            cls._instance = super(HandwritingRecognizer, cls).__new__(cls)
+-            cls._instance.processor = None
+-            cls._instance.model = None
+-            cls._instance.device = "cuda" if torch.cuda.is_available() else "cpu"
+-            cls._instance._loaded = False
++            inst = super(HandwritingRecognizer, cls).__new__(cls)
++            inst.processor = None
++            inst.model = None
++            inst.device = "cpu"
++            inst._loaded = False
++            inst._load_error = None
++            inst._lock = threading.Lock()
++            cls._instance = inst
+         return cls._instance
+ 
+-    def load_model(self, model_name: str = "microsoft/trocr-base-handwritten"):
+-        if self._loaded:
+-            return
+-
+-        try:
+-            from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+-            logger.info(f"Loading TrOCR model '{model_name}' on device '{self.device}'...")
+-            self.processor = TrOCRProcessor.from_pretrained(model_name)
+-            self.model = VisionEncoderDecoderModel.from_pretrained(model_name).to(self.device)
+-            self.model.eval()
+-            self._loaded = True
+-            logger.info("TrOCR model successfully loaded.")
+-        except Exception as e:
+-            logger.warning(f"Could not load Hugging Face TrOCR model: {e}. Fallback OCR mode active.")
+-            self._loaded = False
++    def load_model(self, model_name: str = None):
++        model_name = model_name or os.environ.get("TROCR_MODEL", "microsoft/trocr-base-handwritten")
++        with self._lock:
++            if self._loaded:
++                return
++            try:
++                import torch
++                from transformers import TrOCRProcessor, VisionEncoderDecoderModel
++
++                self.device = "cuda" if torch.cuda.is_available() else "cpu"
++                logger.info(f"Loading TrOCR '{model_name}' on '{self.device}'...")
++                self.processor = TrOCRProcessor.from_pretrained(model_name)
++                self.model = VisionEncoderDecoderModel.from_pretrained(model_name).to(self.device)
++                self.model.eval()
++                self._loaded = True
++                self._load_error = None
++                logger.info("TrOCR model loaded.")
++            except Exception as e:
++                self._loaded = False
++                self._load_error = str(e)
++                logger.error(f"Could not load TrOCR model: {e}")
++
++    def ensure_loaded(self):
++        if not self._loaded:
++            self.load_model()
++        if not self._loaded:
++            raise OCRUnavailableError(
++                "Handwriting model (TrOCR) is not loaded"
++                + (f": {self._load_error}" if self._load_error else ".")
++                + " Check that torch/transformers are installed and the model can be downloaded."
++            )
++
++    @staticmethod
++    def _is_blank(image: Image.Image) -> bool:
++        arr = np.array(image.convert("L"))
++        return arr.std() < 5.0
++
++    def recognize_lines(self, image_paths: List[str], batch_size: int = 8) -> List[str]:
++        """Recognizes a batch of single-line crops. Returns one string per path."""
++        self.ensure_loaded()
++        import torch
++
++        results: List[str] = [""] * len(image_paths)
++        pending = []  # (index, PIL image)
++        for i, p in enumerate(image_paths):
++            if not os.path.exists(p):
++                continue
++            img = Image.open(p).convert("RGB")
++            if self._is_blank(img):
++                continue
++            pending.append((i, img))
++
++        for start in range(0, len(pending), batch_size):
++            chunk = pending[start:start + batch_size]
++            pixel_values = self.processor(
++                images=[im for _, im in chunk], return_tensors="pt"
++            ).pixel_values.to(self.device)
++            with torch.no_grad():
++                ids = self.model.generate(pixel_values, max_new_tokens=64, num_beams=3, early_stopping=True)
++            texts = self.processor.batch_decode(ids, skip_special_tokens=True)
++            for (idx, _), t in zip(chunk, texts):
++                results[idx] = t.strip()
++        return results
+ 
+     def recognize_crop(self, image_path: str) -> str:
+-        """
+-        Runs handwriting recognition on a single image crop.
+-        If TrOCR is loaded, runs genuine deep learning inference.
+-        If crop is blank or unreadable, handles gracefully.
+-        """
++        """Single-crop convenience wrapper (used by the scanned answer-key parser)."""
+         if not os.path.exists(image_path):
+             return ""
++        img = Image.open(image_path).convert("RGB")
++        if self._is_blank(img):
++            return "[Blank or empty answer region]"
++        return self.recognize_lines([image_path])[0]
+ 
+-        try:
+-            image = Image.open(image_path).convert("RGB")
+-            
+-            # Check for near-blank images
+-            import numpy as np
+-            arr = np.array(image.convert("L"))
+-            if arr.std() < 5.0:  # Very flat/uniform color
+-                return "[Blank or empty answer region]"
+-
+-            if self._loaded and self.model is not None and self.processor is not None:
+-                # TrOCR is designed for line-level images. 
+-                # For taller paragraphs, split or downsample appropriately
+-                pixel_values = self.processor(image, return_tensors="pt").pixel_values.to(self.device)
+-                with torch.no_grad():
+-                    generated_ids = self.model.generate(
+-                        pixel_values,
+-                        max_new_tokens=128,
+-                        num_beams=4,
+-                        early_stopping=True
+-                    )
+-                recognized_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+-                return recognized_text.strip()
+-            else:
+-                # Return placeholder guidance if model weights are downloading or offline
+-                return "The fundamental purpose of an operating system is resource management and hardware abstraction."
+-
+-        except Exception as e:
+-            logger.error(f"Inference error recognizing {image_path}: {e}")
+-            return f"[Error processing handwriting: {str(e)}]"
+ 
+ handwriting_service = HandwritingRecognizer()
+diff --git a/backend/app/services/mapping/answer_mapper.py b/backend/app/services/mapping/answer_mapper.py
+index d0c5488..3e2fd92 100644
+--- a/backend/app/services/mapping/answer_mapper.py
++++ b/backend/app/services/mapping/answer_mapper.py
+@@ -49,7 +49,7 @@ class AnswerMapper:
+ 
+         # Pattern 2: 1., 1), 1(a), 2(b) at start of text
+         p2 = re.match(
+-            r"^(\d+)\s*(?:(?:\(([a-zA-Z0-9]{1,3})\))|([a-zA-Z])(?=\s*[:\.\-]|\s|$)|[\.\)])\s*[:\.\-]?\s*(.*)$",
++            r"^(\d+)\s*(?:(?:\(([a-zA-Z0-9]{1,3})\))|([a-zA-Z])(?=\s*[:\.\-]|\s|$)|[\.\),;])\s*[:\.\-]?\s*(.*)$",
+             first_line
+         )
+         if p2:
+diff --git a/backend/app/services/mapping/line_grouper.py b/backend/app/services/mapping/line_grouper.py
+new file mode 100644
+index 0000000..85cae6b
+--- /dev/null
++++ b/backend/app/services/mapping/line_grouper.py
+@@ -0,0 +1,86 @@
++import re
++from typing import Any, Dict, List, Optional, Tuple
++
++# A new answer starts when a line begins with a question number followed by a
++# separator, e.g. "21,", "22.", "23)", "Q24", "Ans 25:", "26 -"
++_MARKER = re.compile(
++    r"^\s*[\(\[]?\s*(?:Q(?:uestion)?\.?\s*|Ans(?:wer)?\.?\s*)?(\d{1,3})\s*[\)\]]?\s*[,.:;\-)]\s*",
++    re.IGNORECASE,
++)
++_BARE_Q = re.compile(r"^\s*(?:Q(?:uestion)?|Ans(?:wer)?)\.?\s*(\d{1,3})\b", re.IGNORECASE)
++
++# Page footers like "1/3" or "2 / 3" must never start an answer
++_PAGE_FOOTER = re.compile(r"^\s*\d{1,2}\s*/\s*\d{1,2}\s*\.?\s*$")
++
++
++def detect_question_number(text: str, max_question_number: Optional[int] = None) -> Optional[int]:
++    if not text or _PAGE_FOOTER.match(text):
++        return None
++    m = _MARKER.match(text) or _BARE_Q.match(text)
++    if not m:
++        return None
++    n = int(m.group(1))
++    if n <= 0:
++        return None
++    if max_question_number is not None and n > max_question_number:
++        return None
++    return n
++
++
++def _union(boxes: List[Tuple[float, float, float, float]]) -> Tuple[float, float, float, float]:
++    return (
++        min(b[0] for b in boxes),
++        min(b[1] for b in boxes),
++        max(b[2] for b in boxes),
++        max(b[3] for b in boxes),
++    )
++
++
++def group_lines_into_answers(
++    pages: List[Dict[str, Any]],
++    max_question_number: Optional[int] = None,
++) -> List[Dict[str, Any]]:
++    """
++    pages: [{"page_idx": int, "bboxes": [...], "texts": [...]}, ...] in page order.
++    Returns answer groups: {"page_idx", "bbox", "text", "lines", "question_number"}.
++
++    Lines that precede the first marker on a page are treated as the continuation of the
++    previous answer (an answer that runs over a page break), or as an unlabeled group if
++    there is no previous answer.
++    """
++    groups: List[Dict[str, Any]] = []
++    current: Optional[Dict[str, Any]] = None
++
++    def flush():
++        nonlocal current
++        if current and current["lines"]:
++            current["bbox"] = _union(current["boxes"])
++            current["text"] = "\n".join(current["lines"])
++            del current["boxes"]
++            groups.append(current)
++        current = None
++
++    for page in pages:
++        # Continuation across pages is kept as its own region on the new page,
++        # because a region's crop must belong to a single page image.
++        if current is not None and current["page_idx"] != page["page_idx"]:
++            flush()
++        for bbox, text in zip(page["bboxes"], page["texts"]):
++            if not text or not text.strip():
++                continue
++            if _PAGE_FOOTER.match(text.strip()):
++                continue
++            qn = detect_question_number(text, max_question_number)
++            if qn is not None or current is None:
++                flush()
++                current = {
++                    "page_idx": page["page_idx"],
++                    "question_number": qn,
++                    "lines": [text.strip()],
++                    "boxes": [bbox],
++                }
++            else:
++                current["lines"].append(text.strip())
++                current["boxes"].append(bbox)
++    flush()
++    return groups
+diff --git a/backend/app/services/preprocessing/image_processor.py b/backend/app/services/preprocessing/image_processor.py
+index dd8421f..fc9c8e6 100644
+--- a/backend/app/services/preprocessing/image_processor.py
++++ b/backend/app/services/preprocessing/image_processor.py
+@@ -134,3 +134,116 @@ def auto_segment_answer_blocks(image_path: str, num_questions: int = 1) -> List[
+         bboxes.append((round(ymin, 3), round(xmin, 3), round(ymax, 3), round(xmax, 3)))
+ 
+     return bboxes
++
++
++def segment_text_lines(
++    image_path: str,
++    min_line_height_frac: float = 0.008,
++    pad_frac: float = 0.004,
++) -> List[Tuple[float, float, float, float]]:
++    """
++    Detects individual handwritten text lines using ink projection.
++    Returns normalized bboxes [ymin, xmin, ymax, xmax], ordered top to bottom.
++    Ruled-paper lines and the margin rule are removed so only handwriting remains.
++    """
++    if not OPENCV_AVAILABLE:
++        return []
++
++    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
++    if img is None:
++        return []
++    h, w = img.shape
++
++    # Downscale for speed/robustness; detection runs on a ~1000px-wide copy
++    scale = 1000.0 / w
++    small = cv2.resize(img, (1000, max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
++    sh, sw = small.shape
++
++    # Binarize: ink = 255
++    bw = cv2.adaptiveThreshold(
++        small, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 41, 18
++    )
++
++    # Remove long horizontal ruling lines and long vertical margin lines
++    horiz = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (sw // 6, 1)))
++    vert = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, sh // 10)))
++    bw = cv2.subtract(bw, cv2.bitwise_or(horiz, vert))
++    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)))
++
++    # Ignore scanner edges / page-bleed borders
++    bx, by = int(sw * 0.02), int(sh * 0.02)
++    bw[:by, :] = 0; bw[-by:, :] = 0; bw[:, :bx] = 0; bw[:, -bx:] = 0
++
++    # Drop isolated specks (dust, scanner noise) so they cannot stretch a line's box sideways
++    n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
++    for ci in range(1, n_cc):
++        if stats[ci, cv2.CC_STAT_AREA] < 18:
++            bw[labels == ci] = 0
++
++    # Merge letters into line-shaped blobs, then project rows
++    merged = cv2.dilate(bw, cv2.getStructuringElement(cv2.MORPH_RECT, (35, 3)))
++    row_ink = (merged > 0).sum(axis=1).astype(float)
++    thresh = max(6.0, sw * 0.012)
++    active = row_ink > thresh
++
++    min_h = max(6, int(sh * min_line_height_frac))
++    lines, start = [], None
++    for y, on in enumerate(active):
++        if on and start is None:
++            start = y
++        elif not on and start is not None:
++            if y - start >= min_h:
++                lines.append((start, y))
++            start = None
++    if start is not None and sh - start >= min_h:
++        lines.append((start, sh))
++
++    # Merge fragments separated by tiny gaps (i-dots, descenders)
++    merged_lines = []
++    for s, e in lines:
++        if merged_lines and s - merged_lines[-1][1] < sh * 0.006:
++            merged_lines[-1] = (merged_lines[-1][0], e)
++        else:
++            merged_lines.append((s, e))
++
++    # Split oversized blobs: slanted/close handwriting can merge 2-3 lines into one band.
++    # TrOCR only reads a single line well, so cut at the valleys of the ink profile.
++    if len(merged_lines) >= 3:
++        heights = sorted(e - s for s, e in merged_lines)
++        median_h = heights[len(heights) // 2]
++        raw_profile = (bw > 0).sum(axis=1).astype(float)
++        kernel = np.ones(5) / 5.0
++        split_lines = []
++        for s, e in merged_lines:
++            n = int(round((e - s) / float(median_h))) if median_h > 0 else 1
++            if (e - s) > 1.6 * median_h and n >= 2:
++                prof = np.convolve(raw_profile[s:e], kernel, mode="same")
++                seg_h = (e - s) / float(n)
++                cuts = [s]
++                for k in range(1, n):
++                    target = int(s + k * seg_h)
++                    lo = max(cuts[-1] + 2, int(target - seg_h * 0.35))
++                    hi = min(e - 2, int(target + seg_h * 0.35))
++                    if hi <= lo:
++                        cuts.append(target)
++                    else:
++                        cuts.append(lo + int(np.argmin(prof[lo - s:hi - s])))
++                cuts.append(e)
++                split_lines.extend(zip(cuts[:-1], cuts[1:]))
++            else:
++                split_lines.append((s, e))
++        merged_lines = split_lines
++
++    bboxes = []
++    pad = int(sh * pad_frac)
++    for s, e in merged_lines:
++        band = bw[s:e, :]
++        cols = np.where(band.sum(axis=0) > 0)[0]
++        if cols.size == 0:
++            continue
++        x0, x1 = max(0, cols[0] - pad * 2), min(sw, cols[-1] + pad * 2)
++        if (x1 - x0) < sw * 0.025:   # too narrow to be handwriting: margin-rule residue
++            continue
++        y0, y1 = max(0, s - pad), min(sh, e + pad)
++        bboxes.append((round(y0 / sh, 4), round(x0 / sw, 4), round(y1 / sh, 4), round(x1 / sw, 4)))
++    return bboxes
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index a868906..249a831 100644
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -5,6 +5,7 @@ sqlalchemy>=2.0.36
+ python-multipart>=0.0.18
+ opencv-python>=4.10.0.84
+ pillow>=11.0.0
++torch>=2.2.0
+ transformers>=4.48.0
+ sentence-transformers>=3.4.0
+ scikit-learn>=1.6.0

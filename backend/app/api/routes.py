@@ -109,7 +109,10 @@ async def parse_text_answer_key(
     if not text_content.strip():
         raise HTTPException(status_code=400, detail="Provided answer key text is empty.")
 
-    return AnswerKeyParser.parse_raw_text(text_content)
+    try:
+        return AnswerKeyParser.parse_raw_text(text_content)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
 
 
 @router.post("/answer-keys/parse-scanned", response_model=AnswerKeyParseResponse)
@@ -179,6 +182,7 @@ def create_exam(exam_in: ExamCreate, db: Session = Depends(get_db)):
             exam_id=exam.id,
             question_number=q_data.question_number,
             question_label=q_data.question_label or f"Q{q_data.question_number}",
+            question_type=q_data.question_type or "subjective",
             question_text=q_data.question_text,
             reference_answer=q_data.reference_answer,
             max_marks=q_data.max_marks,
@@ -289,7 +293,8 @@ async def upload_submission(
         db.refresh(page_record)
 
         # Segment regions
-        bboxes = auto_segment_answer_blocks(prep_path, num_questions=num_q if len(page_paths) == 1 else 2)
+        per_page_q = max(2, min(8, round(num_q / max(1, len(page_paths)))))
+        bboxes = auto_segment_answer_blocks(prep_path, num_questions=per_page_q)
         for r_idx, bbox in enumerate(bboxes):
             crop_filename = f"crop_s{submission.id}_p{page_record.id}_r{r_idx+1}.jpg"
             crop_path = os.path.join(CROPS_DIR, crop_filename)
@@ -346,7 +351,8 @@ async def upload_submission(
                     essential_keywords_str=assigned_q.essential_keywords or "",
                     rubric_criteria=assigned_q.rubric_criteria or "",
                     alternative_answers_str=assigned_q.alternative_answers or "",
-                    negative_marking=assigned_q.negative_marking or 0.0
+                    negative_marking=assigned_q.negative_marking or 0.0,
+                    question_type=assigned_q.question_type or "subjective"
                 )
                 eval_item = EvaluationItem(
                     submission_id=submission.id,
@@ -446,7 +452,8 @@ def remap_region(region_id: int, remap_data: RegionRemapRequest, db: Session = D
                 essential_keywords_str=new_q.essential_keywords or "",
                 rubric_criteria=new_q.rubric_criteria or "",
                 alternative_answers_str=new_q.alternative_answers or "",
-                negative_marking=new_q.negative_marking or 0.0
+                negative_marking=new_q.negative_marking or 0.0,
+                question_type=new_q.question_type or "subjective"
             )
 
             if not eval_item:

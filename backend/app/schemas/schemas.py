@@ -11,6 +11,7 @@ class RubricItem(BaseModel):
 class QuestionCreate(BaseModel):
     question_number: int
     question_label: Optional[str] = ""
+    question_type: Optional[str] = "subjective"
     question_text: str
     reference_answer: str
     max_marks: float
@@ -25,6 +26,7 @@ class QuestionResponse(BaseModel):
     exam_id: int
     question_number: int
     question_label: Optional[str] = ""
+    question_type: Optional[str] = "subjective"
     question_text: str
     reference_answer: str
     max_marks: float
@@ -70,6 +72,7 @@ class ExamSummary(BaseModel):
 class ParsedQuestionItem(BaseModel):
     question_number: int
     question_label: str
+    question_type: str = "subjective"
     question_text: str
     reference_answer: str
     max_marks: float = 5.0
